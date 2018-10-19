@@ -516,6 +516,70 @@ uint8_t cmd_bps(char **args)
     return 0;
 }
 
+uint8_t cmd_listen_timeout(char **args)
+{
+    if(args[0]) {
+        config.listen_timeout = (uint16_t)atoi(args[0]);
+        update_timers();
+    } else {
+        print_uint(config.listen_timeout);
+        print_nl();
+    }
+    return 0;
+}
+
+uint8_t cmd_talk_timeout(char **args)
+{
+    if(args[0]) {
+        config.talk_timeout = (uint16_t)atoi(args[0]);
+        update_timers();
+    } else {
+        print_uint(config.talk_timeout);
+        print_nl();
+    }
+    return 0;
+}
+
+uint8_t cmd_spoll_timeout(char **args)
+{
+    if(args[0]) {
+        config.spoll_timeout = (uint16_t)atoi(args[0]);
+        update_timers();
+    } else {
+        print_uint(config.spoll_timeout);
+        print_nl();
+    }
+    return 0;
+}
+
+uint8_t cmd_read(char **args); /// hack
+
+uint8_t cmd_write_hex(char **args)
+{
+    uint8_t txb[32];
+    uint8_t *pb = txb;
+    char *s;
+    while((s = *args++)) {
+        uint8_t b = 0;
+        char c;
+        while((c = *s++)) {
+            b <<= 4;
+            if(c >= '0' && c <= '9') b |= (c - '0');
+            else if(c >= 'A' && c <= 'F') b |= (c - 'A' + 10);
+            else if(c >= 'a' && c <= 'f') b |= (c - 'a' + 10);
+        }
+        *pb++ = b;
+    }
+    if(pb != txb) {
+        static uint8_t lsn_addr[] = { UNT, UNL, LAD };
+        lsn_addr[2] = LAD + config.addr;
+        gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
+        gpib_tx(txb, pb - txb, 0);
+        if(config.auto_read == 1) cmd_read(0);
+    }
+    return 0;
+}
+
 uint8_t cmd_echo(char **args)
 {
     if(args[0]) {
@@ -635,42 +699,6 @@ uint8_t cmd_read(char **args)
     return 0;
 }
 
-uint8_t cmd_listen_timeout(char **args)
-{
-    if(args[0]) {
-        config.listen_timeout = (uint16_t)atoi(args[0]);
-        update_timers();
-    } else {
-        print_uint(config.listen_timeout);
-        print_nl();
-    }
-    return 0;
-}
-
-uint8_t cmd_talk_timeout(char **args)
-{
-    if(args[0]) {
-        config.talk_timeout = (uint16_t)atoi(args[0]);
-        update_timers();
-    } else {
-        print_uint(config.talk_timeout);
-        print_nl();
-    }
-    return 0;
-}
-
-uint8_t cmd_spoll_timeout(char **args)
-{
-    if(args[0]) {
-        config.spoll_timeout = (uint16_t)atoi(args[0]);
-        update_timers();
-    } else {
-        print_uint(config.spoll_timeout);
-        print_nl();
-    }
-    return 0;
-}
-
 uint8_t cmd_reset(char **args)
 {
     __asm("reset");
@@ -753,6 +781,7 @@ CMDS commands[] = {
     "listen_tmo",   cmd_listen_timeout, 0,
     "talk_tmo",     cmd_talk_timeout,   0,
     "spoll_tmo",    cmd_spoll_timeout,  0,
+    "write_hex",    cmd_write_hex,      0,
     // Prologix commands
     "addr",         cmd_addr,           0,
     "auto",         cmd_auto,           0,
@@ -894,7 +923,7 @@ void main(void) {
             gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
             gpib_tx((uint8_t *)rxbuf, cp - rxbuf, 0);
         
-            if(config.auto_read ==1) {
+            if(config.auto_read == 1) {
                 cmd_read(0);
             } else if(config.auto_read == 2) {
                 cp = rxbuf;
