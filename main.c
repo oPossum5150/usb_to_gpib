@@ -57,18 +57,16 @@ enum {           // - GPIB bus commands (sent with ATN asserted)
     PPD = 0x70   // Parallel Poll Disable
 };
 
-static uint8_t talk[] = { UNT, UNL, LAD + 1, TAD + 0 };
-static uint8_t listen[] = { UNT, UNL, LAD + 0, TAD + 1 };
-//static uint8_t listen[] = { TAD + 1 };
-
-
 typedef struct {
     uint8_t     debug;          // Debug flags
     uint16_t    brg;            // Baud rate generator divisor  13 -> 230400
     uint8_t     echo;           // Echo
-                                // -- Prologix
+    uint16_t    talk_timeout;   // Talk timeout
+    uint16_t    spoll_timeout;  // Serial poll timeout
+                               // -- Prologix
     uint8_t     addr;           // GPIB address to communicate with
     uint8_t     auto_read;      // Automatically read after write
+    uint16_t    listen_timeout; // Listen timeout
     uint8_t     eoi;            // Assert EOI at the end of data sent to the GPID device
     uint8_t     eos;            // Character(s) to append to data sent to GPIB device
     uint8_t     eot_enable;     // Enable appending a character to data received from GPIB device
@@ -80,9 +78,12 @@ TCONFIG config = {
     0,          // Debug flags
     13,         // Baud rate generator divisor  13 -> 230400
     1,          // Echo
+    100,        // Talk timeout
+    100,        // Serial poll timeout
                 //
     1,          // Remote address
     2,          // Auto mode
+    100,        // Listen timeout
     1,          // eoi = on
     2,          // eos == LF
     0,          // eot enable == off
@@ -90,11 +91,130 @@ TCONFIG config = {
     0,          // serial poll status
 };
 
-void set_brg(void)
+typedef struct {
+    uint16_t listen_timeout;
+    uint16_t talk_timeout;
+    uint16_t spoll_timeout;
+} TTIMEOUT;
+
+TTIMEOUT timeout = { 0 };
+
+
+void update_brg(void)
 {
-    uint16_t b = config.brg - 1;
-    SPBRG1 = (uint8_t)b;
-    SPBRGH1 = (uint8_t)(b >> 8);
+    uint16_t brg = config.brg - 1;
+    SPBRG1 = (uint8_t)brg;
+    SPBRGH1 = (uint8_t)(brg >> 8);
+}
+
+void print(char const *s)
+{
+    char c;
+    while((c = *s++)) {
+        while(!PIR1bits.TXIF);  // Wait for tx reg empty
+        TXREG1 = c;
+    }
+}
+
+void print_nl(void)
+{
+    print("\r\n");
+}
+
+void print_args(char **a)
+{
+    if(!*a) return;
+    print_nl();
+    print("Args:");
+    while(*a) {
+        print(" ");
+        print(*a);
+        ++a;
+    }
+    print_nl();
+}
+
+void print_uint(unsigned n)
+{
+#if 1
+	char ds[6] = "/:/:/";
+	while (n >= 30000) n -= 10000, ++ds[0];
+	int16_t i = (int16_t)n;
+	do ++ds[0]; while ((i -= 10000) >= 0);
+	do --ds[1]; while ((i += 1000) < 0);
+	do ++ds[2]; while ((i -= 100) >= 0);
+	do --ds[3]; while ((i += 10) < 0);
+	do ++ds[4]; while (--i >= 0);
+	char *z = ds; while (*z == '0') ++z; if (!*z) --z;
+#else
+    char z[8];
+    itoa(z, n, 10);
+#endif
+    print(z);
+}
+
+void print_ulong(unsigned long n)
+{
+	char ds[11] = "/:/:/:/:/:";
+	while (n >= 2000000000UL) n -= 1000000000UL, ++ds[0];
+	long i = (long)n;
+	do ++ds[0]; while ((i -= 1000000000L) >= 0);
+	do --ds[1]; while ((i += 100000000L) < 0);
+	do ++ds[2]; while ((i -= 10000000L) >= 0);
+	do --ds[3]; while ((i += 1000000L) < 0);
+	do ++ds[4]; while ((i -= 100000L) >= 0);
+	do --ds[5]; while ((i += 10000) < 0);
+	do ++ds[6]; while ((i -= 1000) >= 0);
+	do --ds[7]; while ((i += 100) < 0);
+	do ++ds[8]; while ((i -= 10) >= 0);
+	do --ds[9]; while (++i < 0);
+	char *z = ds; while (*z == '0') ++z; if (!*z) --z;
+	print(z);
+}
+
+uint16_t ms_to_tmr(uint16_t ms)
+{
+    // 256 / 12,000,000 = 
+    // 
+    uint32_t t = ms;
+    // t *= 375
+    t = (t << 8) + (t << 7) - (t << 4) + (t << 3) - t;
+    // t /= 8
+    t >>= 3;
+    if(config.debug & 2) {
+        print("tmr ");
+        print_uint(ms);
+        print(" ms -> ");
+        print_uint((unsigned)t);
+        print_nl();
+    }
+    t ^= 0xFFFF;
+    return (uint16_t)t;
+}
+
+uint16_t us_to_tmr(uint16_t us)
+{
+    uint32_t t = us;
+    // t *= 3;
+    t = (t << 1) + t;
+    // t /= 64
+    t >>= 6;
+    if(config.debug & 2) {
+        print("tmr ");
+        print_uint(us);
+        print(" us -> ");
+        print_uint((unsigned)t);
+        print_nl();
+    }
+    t ^= 0xFFFF;
+    return (uint16_t)t;
+}
+
+void update_timers(void)
+{
+    timeout.listen_timeout = ms_to_tmr(config.listen_timeout);
+    timeout.talk_timeout = ms_to_tmr(config.talk_timeout);
+    timeout.spoll_timeout = ms_to_tmr(config.spoll_timeout);
 }
 
 void gpib_system(uint8_t m)
@@ -179,18 +299,40 @@ void gpib_tx(uint8_t *b, uint8_t l, uint8_t c)
     LATDbits.LD0 = 0;           // Blue LED on
     LATDbits.LD3 = 1;           // Enable pullup drivers
     if(c) LATAbits.LA5 = 0;     // Assert ATN
-
+    TMR0L = 0;
+    INTCONbits.TMR0IF = 0;
     do {
+        TMR0H = timeout.talk_timeout >> 8;
+        TMR0L = timeout.talk_timeout;
         if(l == 1 && !c && config.eoi) // Assert EOI for last byte
             TRISAbits.RA1 = 0;  //  if not command
         LATB = *b++ ^ 0xFFU;    // Put data on GPIB bus
-        LATDbits.LD2 = 0;       // Red LED on
-        while(!PORTAbits.RA3);  // Wait for NRFD to go high
-        LATDbits.LD2 = 1;       // Red LED off
+        if(!PORTAbits.RA3) {// Wait for NRFD to go high
+            LATDbits.LD2 = 0; // Red LED on
+            do {
+                if(INTCONbits.TMR0IF)
+                    break;
+            } while(!PORTAbits.RA3);
+            LATDbits.LD2 = 1;// Red LED off
+        }
         LATAbits.LA2 = 0;       // Assert DAV
-        while(!PORTAbits.RA4);  // Wait for NDAC to go high
+        if(!PORTAbits.RA4) {  // Wait for NDAC to go high
+            LATDbits.LD2 = 0;
+            do {
+                if(INTCONbits.TMR0IF)
+                    break;
+            } while(!PORTAbits.RA4);
+            LATDbits.LD2 = 1;
+        }
         LATAbits.LA2 = 1;       // Deassert DAV
-        while(PORTAbits.RA4);   // Wait for NDAC to go low
+        if(PORTAbits.RA4) {   // Wait for NDAC to go low
+            LATDbits.LD2 = 0;
+            do {
+                if(INTCONbits.TMR0IF)
+                    break;
+            } while(PORTAbits.RA4);
+            LATDbits.LD2 = 1;
+        }
     } while(--l);
 
     LATB = 0xFF;
@@ -207,89 +349,47 @@ void gpib_rx(void)
     uint8_t b;
     uint8_t eoi;
     
+    LATDbits.LD0 = 0;
     LATAbits.LA4 = 0;           // Assert NDAC
-    
+    TMR0L = 0;
+    INTCONbits.TMR0IF = 0;
     do {
         LATAbits.LA3 = 1;       // Deassert NRFD
-        while(PORTAbits.RA2);   // Wait for DAV
+        TMR0H = timeout.listen_timeout >> 8;
+        TMR0L = timeout.listen_timeout;
+        if(PORTAbits.RA2) {   // Wait for DAV
+            LATDbits.LD2 = 0;
+            do {
+                if(INTCONbits.TMR0IF) {
+                    LATAbits.LA4 = 1;
+                    break;
+                }
+            } while(PORTAbits.RA2);
+            LATDbits.LD2 = 1;
+        }
+        if(INTCONbits.TMR0IF) break;
         LATAbits.LA3 = 0;       // Assert NRFD
         b = PORTB ^ 0xFFU;      // Read data
         eoi = PORTA;            // Read EOI
+        LATAbits.LA4 = 1;       // Deassert NDAC
         while(!PIR1bits.TXIF);  // Wait for tx reg empty
         TXREG1 = b;             // Tx on serial
-        LATAbits.LA4 = 1;       // Deassert NDAC
-        while(!PORTAbits.RA2);  // Wait for DAV
+        if(!PORTAbits.RA2) {  // Wait for DAV
+            LATDbits.LD2 = 0;
+            do {
+                if(INTCONbits.TMR0IF) {
+                    eoi = 0;
+                    break;
+                }
+            } while(!PORTAbits.RA2);
+            LATDbits.LD2 = 1;
+        }
         LATAbits.LA4 = 0;       // Assert NDAC
     } while(eoi & 2);
     if(config.eot_enable) {
         while(!PIR1bits.TXIF);  // Wait for tx reg empty
         TXREG1 = config.eot_char;
     }
-}
-
-void print(char const *s)
-{
-    char c;
-    while((c = *s++)) {
-        while(!PIR1bits.TXIF);  // Wait for tx reg empty
-        TXREG1 = c;
-    }
-}
-
-void print_nl(void)
-{
-    print("\r\n");
-}
-
-void print_args(char **a)
-{
-    if(!*a) return;
-    print_nl();
-    print("Args:");
-    while(*a) {
-        print(" ");
-        print(*a);
-        ++a;
-    }
-    print_nl();
-}
-
-void print_uint(unsigned n)
-{
-#if 1
-	char ds[6] = "/:/:/";
-	while (n >= 30000) n -= 10000, ++ds[0];
-	int16_t i = (int16_t)n;
-	do ++ds[0]; while ((i -= 10000) >= 0);
-	do --ds[1]; while ((i += 1000) < 0);
-	do ++ds[2]; while ((i -= 100) >= 0);
-	do --ds[3]; while ((i += 10) < 0);
-	do ++ds[4]; while (--i >= 0);
-	char *z = ds; while (*z == '0') ++z; if (!*z) --z;
-#else
-    char z[8];
-    itoa(z, n, 10);
-#endif
-    print(z);
-}
-
-void print_ulong(unsigned long n)
-{
-	char ds[11] = "/:/:/:/:/:";
-	while (n >= 2000000000UL) n -= 1000000000UL, ++ds[0];
-	long i = (long)n;
-	do ++ds[0]; while ((i -= 1000000000L) >= 0);
-	do --ds[1]; while ((i += 100000000L) < 0);
-	do ++ds[2]; while ((i -= 10000000L) >= 0);
-	do --ds[3]; while ((i += 1000000L) < 0);
-	do ++ds[4]; while ((i -= 100000L) >= 0);
-	do --ds[5]; while ((i += 10000) < 0);
-	do ++ds[6]; while ((i -= 1000) >= 0);
-	do --ds[7]; while ((i += 100) < 0);
-	do ++ds[8]; while ((i -= 10) >= 0);
-	do --ds[9]; while (++i < 0);
-	char *z = ds; while (*z == '0') ++z; if (!*z) --z;
-	print(z);
 }
 
 void gpib_rx1(void)
@@ -313,7 +413,6 @@ void gpib_rx1(void)
     print("spoll "); print_uint(b); print_nl();
     print("eoi "); print((eoi & 2) ? "0" : "1"); print_nl();
 }
-
 
 typedef struct {
     char const *s;
@@ -408,7 +507,7 @@ uint8_t cmd_bps(char **args)
     if(args[0]) {
         unsigned long b = atol(args[0]);
         config.brg = (3000000ul + (b >> 1)) / b;
-        set_brg();
+        update_brg();
     } else {
         unsigned long b = 3000000ul / config.brg;
         print_ulong(b);
@@ -420,7 +519,6 @@ uint8_t cmd_bps(char **args)
 uint8_t cmd_echo(char **args)
 {
     if(args[0]) {
-        //config.echo = atoi(args[0]) != 0;
         config.echo = option(args[0], option_on_off_default);
         //if(config.echo == 2) config.echo = config_default.echo;
     } else {
@@ -530,9 +628,52 @@ uint8_t cmd_loc(char **args)
 
 uint8_t cmd_read(char **args)
 {
-    listen[3] = TAD + config.addr;
-    gpib_tx(listen, sizeof(listen), 1);
+    static uint8_t talk_addr[] = { UNT, UNL, TAD };
+    talk_addr[2] = TAD + config.addr;
+    gpib_tx(talk_addr, sizeof(talk_addr), 1);
     gpib_rx();
+    return 0;
+}
+
+uint8_t cmd_listen_timeout(char **args)
+{
+    if(args[0]) {
+        config.listen_timeout = (uint16_t)atoi(args[0]);
+        update_timers();
+    } else {
+        print_uint(config.listen_timeout);
+        print_nl();
+    }
+    return 0;
+}
+
+uint8_t cmd_talk_timeout(char **args)
+{
+    if(args[0]) {
+        config.talk_timeout = (uint16_t)atoi(args[0]);
+        update_timers();
+    } else {
+        print_uint(config.talk_timeout);
+        print_nl();
+    }
+    return 0;
+}
+
+uint8_t cmd_spoll_timeout(char **args)
+{
+    if(args[0]) {
+        config.spoll_timeout = (uint16_t)atoi(args[0]);
+        update_timers();
+    } else {
+        print_uint(config.spoll_timeout);
+        print_nl();
+    }
+    return 0;
+}
+
+uint8_t cmd_reset(char **args)
+{
+    __asm("reset");
     return 0;
 }
 
@@ -609,6 +750,9 @@ CMDS commands[] = {
     "bps",          cmd_bps,            0,
     "baud",         cmd_bps,            0,
     "echo",         cmd_echo,           0,
+    "listen_tmo",   cmd_listen_timeout, 0,
+    "talk_tmo",     cmd_talk_timeout,   0,
+    "spoll_tmo",    cmd_spoll_timeout,  0,
     // Prologix commands
     "addr",         cmd_addr,           0,
     "auto",         cmd_auto,           0,
@@ -623,8 +767,8 @@ CMDS commands[] = {
     "lon",          cmd_unsupported,    0,
     "mode",         cmd_unsupported,    0,
     "read",         cmd_read,           0,
-    "read_tmo_ms",  cmd_unsupported,    0,
-    "rst",          cmd_unsupported,    0,
+    "read_tmo_ms",  cmd_listen_timeout, 0,
+    "rst",          cmd_reset,          0,
     "savecfg",      cmd_unsupported,    0,
     "spoll",        cmd_spoll,          0,
     "srq",          cmd_srq,            0,
@@ -657,7 +801,7 @@ void main(void) {
     LATE   = 0x03;
     TRISE  = 0x03;
 
-    set_brg();
+    update_brg();
     BAUDCON1 = 0;
     BAUDCON1bits.BRG16 = 1;
     TXSTA1 = 0;
@@ -665,6 +809,12 @@ void main(void) {
     RCSTA1 = 0;
     RCSTA1bits.CREN = 1;
     RCSTA1bits.SPEN = 1;
+
+    update_timers();
+    INTCONbits.INT0IE = 0;
+    T0CON = 0;
+    T0CONbits.T0PS = 7;
+    T0CONbits.TMR0ON = 1;
 
     LATDbits.LD3 = 0;   // PE Pullup enable
     LATDbits.LD4 = 0;   // TE Talk enable
@@ -696,6 +846,7 @@ void main(void) {
 
         cp = rxbuf;
         do {
+            /// todo: check for and clear UART rx errors
             while(!PIR1bits.RCIF);
             c = RCREG1;
             if(config.echo) TXREG1 = c;  // echo
@@ -738,8 +889,9 @@ void main(void) {
                 case 1: *cp++ = '\r'; break;
                 case 2: *cp++ = '\n'; break;
             }
-            talk[2] = LAD + config.addr;
-            gpib_tx(talk, sizeof(talk), 1);
+            static uint8_t lsn_addr[] = { UNT, UNL, LAD };
+            lsn_addr[2] = LAD + config.addr;
+            gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
             gpib_tx((uint8_t *)rxbuf, cp - rxbuf, 0);
         
             if(config.auto_read ==1) {
