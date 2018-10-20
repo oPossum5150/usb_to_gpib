@@ -313,9 +313,8 @@ void gpib_tx(uint8_t const *b, uint8_t l, uint8_t c)
     if(!l) l = strlen((char *)b);
     if(!l) return;
     
-    gpib_talk(c);
-    
     LATDbits.LD0 = 0;           // Blue LED on
+    gpib_talk(c);
     LATDbits.LD3 = 1;           // Enable pullup drivers
     if(c) LATAbits.LA5 = 0;     // Assert ATN
     TMR0H = timeout.talk_timeout >> 8;
@@ -358,9 +357,8 @@ void gpib_tx(uint8_t const *b, uint8_t l, uint8_t c)
     LATDbits.LD3 = 0;           // Disable pullup drivers
     TRISAbits.RA1 = 1;          // Deassert EOI
     if(c) LATAbits.LA5 = 1;     // Deassert ATN
-    LATDbits.LD0 = 1;           // Blue LED off
-    
     gpib_listen();
+    LATDbits.LD0 = 1;           // Blue LED off
 }
 
 void gpib_rx(void)
@@ -368,7 +366,7 @@ void gpib_rx(void)
     uint8_t b;
     uint8_t eoi;
     
-    LATDbits.LD0 = 0;
+    LATDbits.LD0 = 0;           // Blue LED on
     LATAbits.LA4 = 0;           // Assert NDAC
     TMR0H = timeout.listen_timeout >> 8;
     TMR0L = 0;
@@ -409,37 +407,16 @@ void gpib_rx(void)
         while(!PIR1bits.TXIF);  // Wait for tx reg empty
         TXREG1 = config.eot_char;
     }
+    LATDbits.LD0 = 1;           // Blue LED off
 }
 
-void gpib_rx1(void)
-{
-    uint8_t b;
-    uint8_t eoi;
-    
-    LATAbits.LA4 = 0;           // Assert NDAC
-    
-    LATAbits.LA3 = 1;       // Deassert NRFD
-    while(PORTAbits.RA2);   // Wait for DAV
-    LATAbits.LA3 = 0;       // Assert NRFD
-    b = PORTB ^ 0xFFU;      // Read data
-    eoi = PORTA;            // Read EOI
-    //while(!PIR1bits.TXIF);  // Wait for tx reg empty
-    //TXREG1 = b;             // Tx on serial
-    LATAbits.LA4 = 1;       // Deassert NDAC
-    while(!PORTAbits.RA2);  // Wait for DAV
-    LATAbits.LA4 = 0;       // Assert NDAC
-    
-    print("spoll "); print_uint(b); print_nl();
-    print("eoi "); print((eoi & 2) ? "0" : "1"); print_nl();
-}
-
-void gpib_rx2(void)
+void gpib_rx_buf(uint8_t *buf, uint8_t len)
 {
     uint8_t b;
     uint8_t eoi;
     uint16_t n = 0;
     
-    LATDbits.LD0 = 0;
+    LATDbits.LD0 = 0;           // Blue LED on
     LATAbits.LA4 = 0;           // Assert NDAC
     TMR0H = timeout.listen_timeout >> 8;
     TMR0L = 0;
@@ -462,7 +439,9 @@ void gpib_rx2(void)
         b = PORTB ^ 0xFFU;      // Read data
         eoi = PORTA;            // Read EOI
         LATAbits.LA4 = 1;       // Deassert NDAC
-        if(++n > 5) {
+        if(buf) {
+            *buf++ = b;
+        } else {
             while(!PIR1bits.TXIF);  // Wait for tx reg empty
             TXREG1 = b;             // Tx on serial
         }
@@ -477,7 +456,30 @@ void gpib_rx2(void)
             LATDbits.LD2 = 1;
         }
         LATAbits.LA4 = 0;       // Assert NDAC
-    } while(eoi & 2);
+    } while(--len && (eoi & 2));
+    LATDbits.LD0 = 1;           // Blue LED off
+}
+
+void gpib_rx1(void)
+{
+    uint8_t b;
+    uint8_t eoi;
+    
+    LATAbits.LA4 = 0;           // Assert NDAC
+    
+    LATAbits.LA3 = 1;       // Deassert NRFD
+    while(PORTAbits.RA2);   // Wait for DAV
+    LATAbits.LA3 = 0;       // Assert NRFD
+    b = PORTB ^ 0xFFU;      // Read data
+    eoi = PORTA;            // Read EOI
+    //while(!PIR1bits.TXIF);  // Wait for tx reg empty
+    //TXREG1 = b;             // Tx on serial
+    LATAbits.LA4 = 1;       // Deassert NDAC
+    while(!PORTAbits.RA2);  // Wait for DAV
+    LATAbits.LA4 = 0;       // Assert NDAC
+    
+    print("spoll "); print_uint(b); print_nl();
+    print("eoi "); print((eoi & 2) ? "0" : "1"); print_nl();
 }
 
 typedef struct {
@@ -829,31 +831,38 @@ uint8_t cmd_help(char **args)
 
 uint8_t cmd_tek_read_mem(char **args)
 {
-    if(args[0] == 0 || args[1] == 0) return 1;
-    uint32_t a = htou32(args[0]);
-    uint32_t l = htou32(args[1]);
+    uint32_t a = 0;
+    uint32_t l = 256;
+    uint16_t k = 1024;
+    if(args[0]) {
+        a = htou32(args[0]);
+        if(args[1]) {
+            l = htou32(args[1]);
+            if(args[2]) {
+                k = htou32(args[1]);
+            }
+        }
+    }
     static uint8_t const lsn_addr[] = { UNT, UNL, LAD + 29 };
     static uint8_t const talk_addr[] = { UNT, UNL, TAD + 29 };
     gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
     gpib_tx((uint8_t *)"PASSWORD PITBULL", 16, 0);
     uint8_t rm[12] = { 'm', 0, 0, 8, 0, 0, 0, 0, 0, 0, 4, 0 };
+    uint8_t r[5];
     while(l) {
-        rm[4] = a >> 24;
-        rm[5] = a >> 16;
-        rm[6] = a >> 8;
-        rm[7] = a;
-        if(l >= 0x0400) {
-            l -= 0x0400;
-        } else {
-            rm[10] = l >> 8;
-            rm[11] = l;
-            l = 0;
-        }
-        rm[1] = 'm' + 8 + rm[4] + rm[5] + rm[6] + rm[7] + rm[10] + rm[11];
+        if(l < k) k = l;
+        l -= k;
+        rm[1] = 'm' + 8;
+        rm[1] += (rm[4] = a >> 24);
+        rm[1] += (rm[5] = a >> 16);
+        rm[1] += (rm[6] = a >> 8);
+        rm[1] += (rm[7] = a);
+        rm[1] += (rm[10] = k >> 8);
+        rm[1] += (rm[11] = k);
         gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
         gpib_tx(rm, sizeof(rm), 0);
         gpib_tx(talk_addr, sizeof(talk_addr), 1);
-        gpib_rx2();
+        gpib_rx_buf(r, sizeof(r));
         gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
         gpib_tx((uint8_t*)"+", 1, 0);
     }
@@ -968,19 +977,55 @@ void main(void) {
     uint8_t dcl[] = { DCL };
     //gpib_tx(dcl, sizeof(DCL), 1);
    
+    char *end = 0;
     for(;;) {
-        char c, *cp, rxbuf[256];
-
+        char c, *cp, esc, rxbuf[256];
+        esc = 0;
         cp = rxbuf;
+        uint8_t eol = 0;
         do {
             /// todo: check for and clear UART rx errors
             while(!PIR1bits.RCIF);
             c = RCREG1;
-            if(config.echo) TXREG1 = c;  // echo
-            *cp++ = c;
-        } while(c != '\r' && c != '\n');
-        --cp;
-        if(config.echo) print((c == '\r') ? "\n" : "\r");
+            if(c < 32 && !esc) {
+                switch(c) {
+                    case 10:    // LF
+                    case 13:    // CR
+                        eol = 1;
+                        break;
+                    case 27:    // ESC
+                        esc = c;
+                        break;
+                    case 8:     // BS
+                        if(cp > rxbuf) {
+                            --cp;
+                            if(config.echo) {
+                                //TXREG1 = c;
+                                //while(!PIR1bits.TXIF);
+                                //TXREG1 = 0x7F;
+                                print("\x8 \x8");
+                            }
+                        }
+                        break;
+                    case 11:    // VT (ctrl-k, recall previous command line)
+                        while(cp < end) {
+                            if(!*cp) *cp = ' ';
+                            TXREG1 = *cp++;
+                            while(!PIR1bits.TXIF);
+                        }
+                        break;
+                }
+            } else {
+                if(esc) {
+                    esc = 0;
+                    c &= 0x1F;
+                }
+                *cp++ = c;
+                if(config.echo) TXREG1 = c;  // echo
+            }
+        } while(!eol);
+        end = cp;
+        if(config.echo) print("\r\n");
 
         char *pp = rxbuf, plus = 0;
         while(*pp == '+') ++pp, ++plus;
@@ -994,7 +1039,7 @@ void main(void) {
                 if(c == ' ') {
                     *ap++ = 0;
                     while(*ap == ' ') ++ap;
-                    *a++ = ap;
+                    if(*ap) *a++ = ap;
                 } else {
                     ++ap;
                 }
@@ -1016,17 +1061,19 @@ void main(void) {
                 case 1: *cp++ = '\r'; break;
                 case 2: *cp++ = '\n'; break;
             }
-            static uint8_t lsn_addr[] = { UNT, UNL, LAD };
-            lsn_addr[2] = LAD + config.addr;
-            gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
-            gpib_tx((uint8_t *)rxbuf, cp - rxbuf, 0);
-        
-            if(config.auto_read == 1) {
-                cmd_read(0);
-            } else if(config.auto_read == 2) {
-                cp = rxbuf;
-                while(*cp > 32) ++cp;
-                if(*--cp == '?') cmd_read(0);
+            if(cp != rxbuf) {
+                static uint8_t lsn_addr[] = { UNT, UNL, LAD };
+                lsn_addr[2] = LAD + config.addr;
+                gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
+                gpib_tx((uint8_t *)rxbuf, cp - rxbuf, 0);
+
+                if(config.auto_read == 1) {
+                    cmd_read(0);
+                } else if(config.auto_read == 2) {
+                    cp = rxbuf;
+                    while(*cp > 32) ++cp;
+                    if(*--cp == '?') cmd_read(0);
+                }
             }
         }
     }
