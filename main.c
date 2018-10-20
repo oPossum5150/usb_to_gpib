@@ -303,6 +303,7 @@ void gpib_tx(uint8_t *b, uint8_t l, uint8_t c)
     TMR0L = 0;
     INTCONbits.TMR0IF = 0;
     do {
+        //TMR0H = timeout.talk_timeout >> 8;
         TMR0L = timeout.talk_timeout;
         if(l == 1 && !c && config.eoi) // Assert EOI for last byte
             TRISAbits.RA1 = 0;  //  if not command
@@ -356,6 +357,7 @@ void gpib_rx(void)
     INTCONbits.TMR0IF = 0;
     do {
         LATAbits.LA3 = 1;       // Deassert NRFD
+        //TMR0H = timeout.listen_timeout >> 8;
         TMR0L = timeout.listen_timeout;
         if(PORTAbits.RA2) {   // Wait for DAV
             LATDbits.LD2 = 0;
@@ -427,6 +429,7 @@ void gpib_rx2(void)
     INTCONbits.TMR0IF = 0;
     do {
         LATAbits.LA3 = 1;       // Deassert NRFD
+        TMR0H = timeout.listen_timeout >> 8;
         TMR0L = timeout.listen_timeout;
         if(PORTAbits.RA2) {   // Wait for DAV
             LATDbits.LD2 = 0;
@@ -810,14 +813,14 @@ uint8_t cmd_help(char **args)
     return 0;
 }
 
-uint8_t cmd_tek_read_cmd(char **args)
+uint8_t cmd_tek_read_mem(char **args)
 {
     static uint8_t lsn_addr[] = { UNT, UNL, LAD + 29 };
     static uint8_t talk_addr[] = { UNT, UNL, TAD + 29 };
     gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
     gpib_tx((uint8_t *)"PASSWORD PITBULL", 17, 0);
     uint32_t a;
-    for(a = 0x01000000; a < 0x0103000; a += 1024) {
+    for(a = 0x01000000; a < 0x01300000; a += 1024) {
         uint8_t rm[12] = { 'm', 0, 0, 8, 1, 0, 0, 0, 0, 0, 4, 0 };
         rm[5] = a >> 16;
         rm[6] = a >> 8;
@@ -850,7 +853,7 @@ CMDS commands[] = {
     "talk_tmo",     cmd_talk_timeout,   0,
     "spoll_tmo",    cmd_spoll_timeout,  0,
     "write_hex",    cmd_write_hex,      0,
-    "tek_read_mem", cmd_tek_read_cmd,   0,
+    "tek_read_mem", cmd_tek_read_mem,   0,
     // Prologix commands
     "addr",         cmd_addr,           0,
     "auto",         cmd_auto,           0,
