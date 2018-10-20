@@ -299,10 +299,10 @@ void gpib_tx(uint8_t *b, uint8_t l, uint8_t c)
     LATDbits.LD0 = 0;           // Blue LED on
     LATDbits.LD3 = 1;           // Enable pullup drivers
     if(c) LATAbits.LA5 = 0;     // Assert ATN
+    TMR0H = timeout.talk_timeout >> 8;
     TMR0L = 0;
     INTCONbits.TMR0IF = 0;
     do {
-        TMR0H = timeout.talk_timeout >> 8;
         TMR0L = timeout.talk_timeout;
         if(l == 1 && !c && config.eoi) // Assert EOI for last byte
             TRISAbits.RA1 = 0;  //  if not command
@@ -351,11 +351,11 @@ void gpib_rx(void)
     
     LATDbits.LD0 = 0;
     LATAbits.LA4 = 0;           // Assert NDAC
+    TMR0H = timeout.listen_timeout >> 8;
     TMR0L = 0;
     INTCONbits.TMR0IF = 0;
     do {
         LATAbits.LA3 = 1;       // Deassert NRFD
-        TMR0H = timeout.listen_timeout >> 8;
         TMR0L = timeout.listen_timeout;
         if(PORTAbits.RA2) {   // Wait for DAV
             LATDbits.LD2 = 0;
@@ -412,6 +412,53 @@ void gpib_rx1(void)
     
     print("spoll "); print_uint(b); print_nl();
     print("eoi "); print((eoi & 2) ? "0" : "1"); print_nl();
+}
+
+void gpib_rx2(void)
+{
+    uint8_t b;
+    uint8_t eoi;
+    uint16_t n = 0;
+    
+    LATDbits.LD0 = 0;
+    LATAbits.LA4 = 0;           // Assert NDAC
+    TMR0H = timeout.listen_timeout >> 8;
+    TMR0L = 0;
+    INTCONbits.TMR0IF = 0;
+    do {
+        LATAbits.LA3 = 1;       // Deassert NRFD
+        TMR0L = timeout.listen_timeout;
+        if(PORTAbits.RA2) {   // Wait for DAV
+            LATDbits.LD2 = 0;
+            do {
+                if(INTCONbits.TMR0IF) {
+                    LATAbits.LA4 = 1;
+                    break;
+                }
+            } while(PORTAbits.RA2);
+            LATDbits.LD2 = 1;
+        }
+        if(INTCONbits.TMR0IF) break;
+        LATAbits.LA3 = 0;       // Assert NRFD
+        b = PORTB ^ 0xFFU;      // Read data
+        eoi = PORTA;            // Read EOI
+        LATAbits.LA4 = 1;       // Deassert NDAC
+        if(++n > 4) {
+            while(!PIR1bits.TXIF);  // Wait for tx reg empty
+            TXREG1 = b;             // Tx on serial
+        }
+        if(!PORTAbits.RA2) {  // Wait for DAV
+            LATDbits.LD2 = 0;
+            do {
+                if(INTCONbits.TMR0IF) {
+                    eoi = 0;
+                    break;
+                }
+            } while(!PORTAbits.RA2);
+            LATDbits.LD2 = 1;
+        }
+        LATAbits.LA4 = 0;       // Assert NDAC
+    } while(eoi & 2);
 }
 
 typedef struct {
@@ -763,6 +810,27 @@ uint8_t cmd_help(char **args)
     return 0;
 }
 
+uint8_t cmd_tek_read_cmd(char **args)
+{
+    static uint8_t lsn_addr[] = { UNT, UNL, LAD + 29 };
+    static uint8_t talk_addr[] = { UNT, UNL, TAD + 29 };
+    gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
+    gpib_tx((uint8_t *)"PASSWORD PITBULL", 17, 0);
+    uint32_t a;
+    for(a = 0x01000000; a < 0x0103000; a += 1024) {
+        uint8_t rm[12] = { 'm', 0, 0, 8, 1, 0, 0, 0, 0, 0, 4, 0 };
+        rm[5] = a >> 16;
+        rm[6] = a >> 8;
+        rm[7] = a;
+        rm[1] = 'm' + 8 + 1 + 4 + rm[5] + rm[6] + rm[7];
+        gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
+        gpib_tx(rm, sizeof(rm), 0);
+        gpib_tx(talk_addr, sizeof(talk_addr), 1);
+        gpib_rx2();
+    }
+    return 0;
+}
+
 typedef struct {
     char const * name;
     uint8_t (*function)(char **args);
@@ -782,6 +850,7 @@ CMDS commands[] = {
     "talk_tmo",     cmd_talk_timeout,   0,
     "spoll_tmo",    cmd_spoll_timeout,  0,
     "write_hex",    cmd_write_hex,      0,
+    "tek_read_mem", cmd_tek_read_cmd,   0,
     // Prologix commands
     "addr",         cmd_addr,           0,
     "auto",         cmd_auto,           0,
