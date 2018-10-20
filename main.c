@@ -839,7 +839,7 @@ uint8_t cmd_tek_read_mem(char **args)
         if(args[1]) {
             l = htou32(args[1]);
             if(args[2]) {
-                k = htou32(args[1]);
+                k = htou32(args[2]);
             }
         }
     }
@@ -863,6 +863,7 @@ uint8_t cmd_tek_read_mem(char **args)
         gpib_tx(rm, sizeof(rm), 0);
         gpib_tx(talk_addr, sizeof(talk_addr), 1);
         gpib_rx_buf(r, sizeof(r));
+        gpib_rx();
         gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
         gpib_tx((uint8_t*)"+", 1, 0);
     }
