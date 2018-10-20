@@ -172,6 +172,25 @@ void print_ulong(unsigned long n)
 	print(z);
 }
 
+uint8_t atoh(char c)
+{
+    if(c >= '0' && c <= '9') return c - '0';
+    if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+uint32_t htou32(char *s)
+{
+    char c;
+    uint32_t u = 0;
+    while((c = *s++)) {
+        u <<= 4;
+        u |= atoh(c);
+    }
+    return u;
+}
+
 uint16_t ms_to_tmr(uint16_t ms)
 {
     // 256 / 12,000,000 = 
@@ -289,7 +308,7 @@ void gpib_listen(void)
     TRISAbits.RA5 = 0;      // ATN as output
 }
 
-void gpib_tx(uint8_t *b, uint8_t l, uint8_t c)
+void gpib_tx(uint8_t const *b, uint8_t l, uint8_t c)
 {
     if(!l) l = strlen((char *)b);
     if(!l) return;
@@ -303,7 +322,6 @@ void gpib_tx(uint8_t *b, uint8_t l, uint8_t c)
     TMR0L = 0;
     INTCONbits.TMR0IF = 0;
     do {
-        //TMR0H = timeout.talk_timeout >> 8;
         TMR0L = timeout.talk_timeout;
         if(l == 1 && !c && config.eoi) // Assert EOI for last byte
             TRISAbits.RA1 = 0;  //  if not command
@@ -357,7 +375,6 @@ void gpib_rx(void)
     INTCONbits.TMR0IF = 0;
     do {
         LATAbits.LA3 = 1;       // Deassert NRFD
-        //TMR0H = timeout.listen_timeout >> 8;
         TMR0L = timeout.listen_timeout;
         if(PORTAbits.RA2) {   // Wait for DAV
             LATDbits.LD2 = 0;
@@ -429,7 +446,6 @@ void gpib_rx2(void)
     INTCONbits.TMR0IF = 0;
     do {
         LATAbits.LA3 = 1;       // Deassert NRFD
-        TMR0H = timeout.listen_timeout >> 8;
         TMR0L = timeout.listen_timeout;
         if(PORTAbits.RA2) {   // Wait for DAV
             LATDbits.LD2 = 0;
@@ -446,7 +462,7 @@ void gpib_rx2(void)
         b = PORTB ^ 0xFFU;      // Read data
         eoi = PORTA;            // Read EOI
         LATAbits.LA4 = 1;       // Deassert NDAC
-        if(++n > 4) {
+        if(++n > 5) {
             while(!PIR1bits.TXIF);  // Wait for tx reg empty
             TXREG1 = b;             // Tx on serial
         }
@@ -614,9 +630,7 @@ uint8_t cmd_write_hex(char **args)
         char c;
         while((c = *s++)) {
             b <<= 4;
-            if(c >= '0' && c <= '9') b |= (c - '0');
-            else if(c >= 'A' && c <= 'F') b |= (c - 'A' + 10);
-            else if(c >= 'a' && c <= 'f') b |= (c - 'a' + 10);
+            b |= atoh(c);
         }
         *pb++ = b;
     }
@@ -815,21 +829,33 @@ uint8_t cmd_help(char **args)
 
 uint8_t cmd_tek_read_mem(char **args)
 {
-    static uint8_t lsn_addr[] = { UNT, UNL, LAD + 29 };
-    static uint8_t talk_addr[] = { UNT, UNL, TAD + 29 };
+    if(args[0] == 0 || args[1] == 0) return 1;
+    uint32_t a = htou32(args[0]);
+    uint32_t l = htou32(args[1]);
+    static uint8_t const lsn_addr[] = { UNT, UNL, LAD + 29 };
+    static uint8_t const talk_addr[] = { UNT, UNL, TAD + 29 };
     gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
-    gpib_tx((uint8_t *)"PASSWORD PITBULL", 17, 0);
-    uint32_t a;
-    for(a = 0x01000000; a < 0x01300000; a += 1024) {
-        uint8_t rm[12] = { 'm', 0, 0, 8, 1, 0, 0, 0, 0, 0, 4, 0 };
+    gpib_tx((uint8_t *)"PASSWORD PITBULL", 16, 0);
+    uint8_t rm[12] = { 'm', 0, 0, 8, 0, 0, 0, 0, 0, 0, 4, 0 };
+    while(l) {
+        rm[4] = a >> 24;
         rm[5] = a >> 16;
         rm[6] = a >> 8;
         rm[7] = a;
-        rm[1] = 'm' + 8 + 1 + 4 + rm[5] + rm[6] + rm[7];
+        if(l >= 0x0400) {
+            l -= 0x0400;
+        } else {
+            rm[10] = l >> 8;
+            rm[11] = l;
+            l = 0;
+        }
+        rm[1] = 'm' + 8 + rm[4] + rm[5] + rm[6] + rm[7] + rm[10] + rm[11];
         gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
         gpib_tx(rm, sizeof(rm), 0);
         gpib_tx(talk_addr, sizeof(talk_addr), 1);
         gpib_rx2();
+        gpib_tx(lsn_addr, sizeof(lsn_addr), 1);
+        gpib_tx((uint8_t*)"+", 1, 0);
     }
     return 0;
 }
